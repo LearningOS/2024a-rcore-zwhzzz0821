@@ -17,6 +17,8 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_us;
+
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -54,6 +56,8 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            task_time: 0,
+            task_call_time: [0; 500]
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -80,6 +84,8 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        let now_time_us = get_time_us();
+        task0.task_time = ((now_time_us / 1_000_000) & 0xffff) * 1000 + (now_time_us % 1_000_000) / 1000;
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -124,6 +130,10 @@ impl TaskManager {
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
+            if inner.tasks[next].task_time == 0 {
+                let now_time_us = get_time_us();
+                inner.tasks[next].task_time =  ((now_time_us / 1_000_000) & 0xffff) * 1000 + (now_time_us % 1_000_000) / 1000;
+            }
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
@@ -134,6 +144,20 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// 获得当前任务的控制块
+    pub fn get_current_tcb(&self) -> TaskControlBlock {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].clone()
+    }
+
+    /// 更新系统调用次数
+    pub fn update_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_call_time[syscall_id] += 1;
     }
 }
 
